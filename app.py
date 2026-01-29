@@ -75,8 +75,9 @@ def analyze():
         "assign": files.get("assign", {}),
         "sql_tables": files.get("sql_tables", {}),
         "tx": files.get("tx", {}),
-        # ✅ NUEVO
         "fd_sizes": files.get("fd_sizes", {}),
+        "copybooks": files.get("copybooks", []),   # 👈 NUEVO
+        "functional_summary": files.get("functional_summary"),
         "loops_count": len(explanation.loops or []),
         "ifs_count": len(explanation.conditions or []),
         "moves_count": len(explanation.moves or []),

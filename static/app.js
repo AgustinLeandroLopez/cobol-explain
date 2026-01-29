@@ -9,18 +9,53 @@ function badge(ok) {
   return ok ? `<span class="badge text-bg-success">Sí</span>` : `<span class="badge text-bg-secondary">No</span>`;
 }
 
-function card(title, bodyHtml) {
+function card(title, bodyHtml, opts = {}) {
+  const icon = opts.icon ?? "📌";
+  const accentClass = opts.accentClass ?? "bg-primary";
+  const subtitle = opts.subtitle ?? "";
+
   return `
     <div class="col-md-6 col-lg-4">
-      <div class="card shadow-sm h-100">
+      <div class="card shadow-sm dash-card dash-hover h-100">
+        <div class="dash-accent ${accentClass}"></div>
         <div class="card-body">
-          <div class="fw-semibold mb-2">${title}</div>
+          <div class="d-flex align-items-start justify-content-between mb-2">
+            <div>
+              <div class="dash-title">
+                <span class="me-2">${icon}</span>${title}
+              </div>
+              ${subtitle ? `<div class="dash-subtle mt-1">${subtitle}</div>` : ``}
+            </div>
+          </div>
           <div>${bodyHtml}</div>
         </div>
       </div>
     </div>
   `;
 }
+ 
+
+function heroCard(title, bodyHtml) {
+  return `
+    <div class="col-12">
+      <div class="card shadow-sm border-0">
+        <div class="card-body p-4 bg-primary-subtle rounded-3 border-start border-5 border-primary">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <span style="font-size: 1.2rem;">🧠</span>
+            <div class="h5 mb-0 fw-bold">${title}</div>
+          </div>
+
+          <div class="fs-6">${bodyHtml}</div>
+
+          <div class="mt-3 small text-muted">
+            *Generado automáticamente a partir de archivos, SQL y control transaccional detectado.
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 
 function list(items) {
   if (!items || items.length === 0) return `<div class="text-muted">—</div>`;
@@ -65,15 +100,19 @@ form.addEventListener("submit", async (e) => {
     <div class="mt-1"><span class="text-muted">Bucles:</span> <b>${s.loops_count}</b></div>
     <div><span class="text-muted">Condicionales:</span> <b>${s.ifs_count}</b></div>
     <div><span class="text-muted">Asignaciones:</span> <b>${s.moves_count}</b></div>
-    `);
+    `, { icon: "🧾", accentClass: "bg-dark" });
 
     const inputs = s.inputs || [];
     const outputs = s.outputs || [];
     const assign = s.assign || {};
     const fdSizes = s.fd_sizes || {};   // ✅ NUEVO
 
-    resultsDiv.innerHTML += card("Archivos de entrada", renderFiles(inputs, assign, fdSizes));
-    resultsDiv.innerHTML += card("Archivos de salida", renderFiles(outputs, assign, fdSizes));
+    resultsDiv.innerHTML += card("Archivos de entrada", renderFiles(inputs, assign, fdSizes),
+    { icon: "📥", accentClass: "bg-success", subtitle: "Lecturas detectadas por OPEN INPUT" }
+    );
+    resultsDiv.innerHTML += card("Archivos de salida", renderFiles(outputs, assign, fdSizes),
+     { icon: "📤", accentClass: "bg-info", subtitle: "Escrituras detectadas por OPEN OUTPUT/EXTEND/I-O" }
+    );
 
     function renderFiles(files, assign, fdSizes) {
     if (!files || files.length === 0) return `<div class="text-muted">—</div>`;
@@ -102,7 +141,9 @@ form.addEventListener("submit", async (e) => {
     const tableLines = Object.entries(tables).map(
     ([t, ops]) => `${t} → ${ops.join(", ")}`
     );
-    resultsDiv.innerHTML += card("Base de datos", list(tableLines));
+    resultsDiv.innerHTML += card("Base de datos", list(tableLines),
+    { icon: "🗄️", accentClass: "bg-warning" }
+    );
 
     // Tx
     const tx = s.tx || {};
@@ -113,9 +154,17 @@ form.addEventListener("submit", async (e) => {
     <div>
         ${tx.has_rollback ? "✅ Se detecta ROLLBACK" : "⚠️ No se detecta ROLLBACK"}
     </div>
+    `, { icon: "🧷", accentClass: "bg-secondary" });
+
+    // Copybooks
+    resultsDiv.innerHTML += card("Copybooks", list(s.copybooks),
+      { icon: "📚", accentClass: "bg-primary" }
+    );
+
+    // Functional summary
+    resultsDiv.innerHTML += heroCard("Funcionalidad (estimada)", `
+      ${s.functional_summary ? `<div>${s.functional_summary}</div>` : `<div class="text-muted">—</div>`}
     `);
-
-
 
     // Downloads
     dlTech.href = s.downloads.tech;

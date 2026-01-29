@@ -276,6 +276,54 @@ def extract_program_id(cobol: str) -> Optional[str]:
     m = re.search(r"\bPROGRAM-ID\s*\.\s*([A-Z0-9_-]+)\s*\.", cobol, flags=re.IGNORECASE)
     return m.group(1) if m else None
 
+def extract_copybooks(cobol: str) -> List[str]:
+    cobol_nc = remove_cobol_comments(cobol)
+
+    copies = set()
+
+    # 1) COPY XXXXX
+    for m in re.finditer(r"\bCOPY\s+([A-Z0-9_-]+)\b", cobol_nc, flags=re.IGNORECASE):
+        copies.add(m.group(1).upper())
+
+    # 2) INCLUDE XXXXX.  (no-SQL)
+    for m in re.finditer(
+        r"^\s*INCLUDE\s+([A-Z0-9_-]+)\b",
+        cobol_nc,
+        flags=re.IGNORECASE | re.MULTILINE
+    ):
+        copies.add(m.group(1).upper())
+
+    # 3) EXEC SQL INCLUDE XXXXX END-EXEC (DB2)
+    for m in re.finditer(
+        r"\bEXEC\s+SQL\b.*?\bINCLUDE\s+([A-Z0-9_#$@-]+)\b.*?\bEND-EXEC\b",
+        cobol_nc,
+        flags=re.IGNORECASE | re.DOTALL
+    ):
+        copies.add(m.group(1).upper())
+
+    # ✅ Excluir includes “arquitectónicos”
+    ARCH_INFRA_COPYBOOKS = {
+    # DB2
+    "SQLCA",
+    "SQLDA",
+    "SQLIMSCA",
+
+    # CICS
+    "DFHCOMMAREA",
+    "DFHEIBLK",
+    "DFHRESP",
+    "DFHVALUE",
+
+    # DB2 infra
+    "DSNAREA",
+    "DSNTIAR",
+    }
+    copies = {c for c in copies if c not in ARCH_INFRA_COPYBOOKS}
+
+    return sorted(copies)
+
+
+
 def extract_fds(cobol: str) -> List[str]:
     """
     Devuelve file-names declarados en FD.
@@ -764,14 +812,65 @@ def extract_io(cobol: str) -> Dict[str, Any]:
 
     return io
 
+def build_functionality_summary(files_info: Dict[str, Any], metrics: Dict[str, int]) -> str:
+    inputs = files_info.get("inputs", []) or []
+    outputs = files_info.get("outputs", []) or []
+    tables = files_info.get("sql_tables", {}) or {}
+    tx = files_info.get("tx", {}) or {}
 
+    loops = metrics.get("loops_count", 0)
+    ifs = metrics.get("ifs_count", 0)
+    moves = metrics.get("moves_count", 0)
 
-#def detect_stop_run(cobol: str) -> bool:
-  #  return re.search(r"\bSTOP\s+RUN\b", cobol, flags=re.IGNORECASE) is not None
+    parts: List[str] = []
 
+    # I/O archivos
+    if inputs:
+        parts.append(f"Lee {len(inputs)} archivo(s) de entrada ({', '.join(inputs[:4])}{'…' if len(inputs) > 4 else ''}).")
+    if outputs:
+        parts.append(f"Genera/escribe {len(outputs)} archivo(s) de salida ({', '.join(outputs[:4])}{'…' if len(outputs) > 4 else ''}).")
 
-#def detect_goback(cobol: str) -> bool:
- #   return re.search(r"\bGOBACK\b", cobol, flags=re.IGNORECASE) is not None
+    # DB
+    if tables:
+        reads = []
+        writes = []
+        for t, ops in tables.items():
+            for op in ops:
+                if op in ("INSERT", "UPDATE", "DELETE"):
+                    writes.append(t)
+                elif op == "SELECT":
+                    reads.append(t)
+        reads = sorted(set(reads))
+        writes = sorted(set(writes))
+
+        if reads and not writes:
+            parts.append(f"Consulta {len(reads)} tabla(s) (SELECT).")
+        elif writes and not reads:
+            parts.append(f"Actualiza {len(writes)} tabla(s) (INSERT/UPDATE/DELETE).")
+        else:
+            if reads:
+                parts.append(f"Consulta {len(reads)} tabla(s).")
+            if writes:
+                parts.append(f"Actualiza {len(writes)} tabla(s).")
+
+    # Tx
+    #if tx.get("has_commit") or tx.get("has_rollback"):
+    #    parts.append("Se detecta control transaccional (COMMIT/ROLLBACK).")
+    #else:
+    #    parts.append("No se detecta control transaccional (COMMIT/ROLLBACK).")
+
+    # Complejidad (muy conservador)
+    #if loops + ifs > 0:
+    #    parts.append(f"Contiene lógica de proceso (bucles: {loops}, condicionales: {ifs}, asignaciones: {moves}).")
+    #else:
+    #    parts.append(f"Lógica detectada baja (asignaciones: {moves}).")
+
+    # Fallback
+    if not parts:
+        return "No se pudo inferir una funcionalidad general con las reglas actuales."
+
+    return " ".join(parts)
+
 
 
 def explain_cobol_file(path: str) -> CobolExplanation:
@@ -790,6 +889,7 @@ def explain_cobol_file(path: str) -> CobolExplanation:
 
     sql_usages = extract_sql_table_usage(cobol)
     tables = summarize_table_usage(sql_usages)
+    copies = extract_copybooks(cobol) 
 
     # Clasificación por modo OPEN
     inputs = [f for f, m in open_modes.items() if m == "INPUT"]
@@ -801,11 +901,20 @@ def explain_cobol_file(path: str) -> CobolExplanation:
         "open_modes": open_modes,
         "inputs": inputs,
         "outputs": outputs,
-        # NUEVO: SQL / tablas
         "sql_tables": tables, 
-        "tx": tx,                 # <-- NUEVO
+        "tx": tx,                 
         "fd_sizes": fd_sizes,
+        "copybooks": copies,   # 👈 NUEVO
     }
+
+    metrics = {
+        "loops_count": len(loops),
+        "ifs_count": len(extract_if_conditions(cobol)),
+        "moves_count": len(extract_moves(cobol)),
+    }
+
+    files_info["functional_summary"] = build_functionality_summary(files_info, metrics)
+
 
     return CobolExplanation(
         program_id=extract_program_id(cobol),
