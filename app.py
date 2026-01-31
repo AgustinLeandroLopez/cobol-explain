@@ -77,7 +77,11 @@ def analyze():
         "tx": files.get("tx", {}),
         "fd_sizes": files.get("fd_sizes", {}),
         "copybooks": files.get("copybooks", []),   # 👈 NUEVO
+        "calls": files.get("calls", []),   # 👈 NUEVO
+        "calls_static": files.get("calls_static", []),
+        "calls_dynamic": files.get("calls_dynamic", []),
         "functional_summary": files.get("functional_summary"),
+        "program_type": files.get("program_type", {"type": "BATCH", "evidence": []}),
         "loops_count": len(explanation.loops or []),
         "ifs_count": len(explanation.conditions or []),
         "moves_count": len(explanation.moves or []),

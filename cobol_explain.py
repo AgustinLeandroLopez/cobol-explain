@@ -322,6 +322,121 @@ def extract_copybooks(cobol: str) -> List[str]:
 
     return sorted(copies)
 
+def extract_calls(cobol: str) -> Dict[str, List[str]]:
+    """
+    Separa CALLs:
+      - static: CALL 'PGM' / "PGM"
+      - dynamic: CALL WS-PGM (y agrega targets si detecta MOVE 'X' TO WS-PGM)
+
+    Devuelve:
+      { "static": [...], "dynamic": [...], "all": [...] }
+    """
+    cobol_nc_full = remove_cobol_comments(cobol)
+
+    cobol_nc = cobol_nc_full
+    m = re.search(r"\bPROCEDURE\s+DIVISION\b", cobol_nc, flags=re.IGNORECASE)
+    if m:
+        cobol_nc = cobol_nc[m.end():]
+
+    # Solo PROCEDURE DIVISION
+    m = re.search(r"\bPROCEDURE\s+DIVISION\b", cobol_nc, flags=re.IGNORECASE)
+    if m:
+        cobol_nc = cobol_nc[m.end():]
+
+    terminators = (
+        r"\bEND-CALL\b"
+        r"|\bON\s+EXCEPTION\b"
+        r"|\bNOT\s+ON\s+EXCEPTION\b"
+        r"|\."
+        r"|\bEXEC\s+SQL\b"
+        r"|\bEXEC\s+CICS\b"
+        r"|\bIF\b|\bEVALUATE\b|\bWHEN\b|\bMOVE\b|\bADD\b|\bSUBTRACT\b|\bMULTIPLY\b|\bDIVIDE\b"
+        r"|\bCOMPUTE\b|\bPERFORM\b|\bGO\s+TO\b|\bGOTO\b|\bCALL\b"
+        r"|\bREAD\b|\bWRITE\b|\bREWRITE\b|\bOPEN\b|\bCLOSE\b|\bDELETE\b"
+    )
+
+    call_pattern = re.compile(
+        rf"""
+        (?<![A-Z0-9_#$@-])
+        CALL\s+
+        (?:(['"])(?P<lit>[A-Z0-9_#$@-]+)\1|(?P<id>[A-Z0-9_#$@-]+))
+        (?:\s+USING\s+(?P<using>.*?))?
+        (?=(?:\s*(?:{terminators})|\s*$))
+        """,
+        flags=re.IGNORECASE | re.DOTALL | re.VERBOSE | re.MULTILINE
+    )
+
+    using_token = re.compile(r"['\"][^'\"]+['\"]|[A-Z0-9_#$@-]+", flags=re.IGNORECASE)
+    drop_words = {
+        "USING", "BY", "REFERENCE", "VALUE", "CONTENT",
+        "ADDRESS", "OF", "LENGTH",
+        "RETURNING", "GIVING",
+        "ON", "EXCEPTION", "NOT", "END-CALL"
+    }
+
+    static_calls = []
+    dynamic_calls = []
+    seen_static = set()
+    seen_dynamic = set()
+
+    for m in call_pattern.finditer(cobol_nc):
+        lit_name = (m.group("lit") or "").strip()
+        id_name = (m.group("id") or "").strip()
+
+        name = (lit_name or id_name).upper()
+        if not name:
+            continue
+
+        # USING args
+        using_args = []
+        using_raw = (m.group("using") or "").strip()
+        if using_raw:
+            tokens = using_token.findall(using_raw)
+            cleaned = []
+            for t in tokens:
+                tt = t.strip().strip(",").upper()
+                if not tt or tt in drop_words:
+                    continue
+                cleaned.append(tt)
+            using_args = cleaned[:10]
+
+        # display base
+        display = name
+        if using_args:
+            display += f" → <b>USING:</b> {', '.join(using_args)}"
+
+        # Static vs Dynamic
+        if lit_name:
+            if display not in seen_static:
+                seen_static.add(display)
+                static_calls.append(display)
+        else:
+            # dynamic: agregar targets si se puede
+            targets = set()
+
+            # 1) MOVEs en PROCEDURE DIVISION (cobol_nc ya es procedure-only en tu función)
+            for t in _find_literal_moves_to_var(cobol_nc, name):
+                targets.add(t)
+
+            # 2) VALUE en DATA DIVISION (necesitamos el cobol sin comentarios completo)
+            #    OJO: tenés que tener disponible cobol_nc_full (ver nota abajo)
+            for t in _find_value_clause_literal(cobol_nc_full, name):
+                targets.add(t)
+
+            targets = sorted(targets)
+
+            if targets:
+                display += f" → <b>Targets:</b> {', '.join(targets)}"
+
+
+            if display not in seen_dynamic:
+                seen_dynamic.add(display)
+                dynamic_calls.append(display)
+
+    all_calls = static_calls + dynamic_calls
+    return {"static": static_calls, "dynamic": dynamic_calls, "all": all_calls}
+
+
 
 
 def extract_fds(cobol: str) -> List[str]:
@@ -350,6 +465,15 @@ def remove_cobol_comments(cobol: str) -> str:
             line = line.split("*>", 1)[0]
         cleaned_lines.append(line)
     return "\n".join(cleaned_lines)
+
+def detect_display_count(cobol: str) -> int:
+    cobol_nc = remove_cobol_comments(cobol)
+    # Solo PROCEDURE DIVISION para evitar data division
+    m = re.search(r"\bPROCEDURE\s+DIVISION\b", cobol_nc, flags=re.IGNORECASE)
+    if m:
+        cobol_nc = cobol_nc[m.end():]
+    return len(re.findall(r"(?i)\bDISPLAY\b", cobol_nc))
+
 
 def extract_data_record_name(fd_block: str) -> Optional[str]:
     # DATA RECORD IS REG-ENTRADA.
@@ -670,13 +794,54 @@ def extract_open_modes(cobol: str) -> Dict[str, str]:
     return modes
 
 
-"""def extract_displays(cobol: str) -> List[str]:
-    # Captura DISPLAY "...." o DISPLAY '....' y devuelve SOLO el texto (sin comillas)
-    results: List[str] = []
-    for m in re.finditer(r"\bDISPLAY\s+(['\"])(.*?)\1", cobol, flags=re.IGNORECASE):
-        text = m.group(2)
-        results.append(text)
-    return results"""
+def _find_literal_moves_to_var(proc_text: str, var_name: str) -> List[str]:
+    """
+    Encuentra literales asignados a var_name vía MOVE 'X' TO var_name.
+    proc_text debe ser PROCEDURE DIVISION sin comentarios.
+    """
+    var = re.escape(var_name)
+
+    pat = re.compile(
+        rf"""
+        \bMOVE\s+
+        (['"])(?P<lit>[^'"]+)\1
+        \s+TO\s+
+        {var}\b
+        """,
+        flags=re.IGNORECASE | re.VERBOSE
+    )
+
+    vals = set()
+    for m in pat.finditer(proc_text):
+        lit = (m.group("lit") or "").strip()
+        if lit:
+            vals.add(lit.upper())
+
+    return sorted(vals)
+
+def _find_value_clause_literal(cobol_nc_full: str, var_name: str) -> List[str]:
+    """
+    Busca VALUE 'XXXX' asignado en la definición del campo (DATA DIVISION),
+    típico: 01 WS-PROG-NAME PIC X(8) VALUE 'PGM2'.
+    """
+    var = re.escape(var_name)
+
+    pat = re.compile(
+        rf"""
+        (?ix)
+        ^\s*\d+\s+{var}\b.*?\bVALUE\s+(['"])(?P<lit>[^'"]+)\1
+        """,
+        flags=re.IGNORECASE | re.VERBOSE | re.MULTILINE
+    )
+
+    vals = set()
+    for m in pat.finditer(cobol_nc_full):
+        lit = (m.group("lit") or "").strip()
+        if lit:
+            vals.add(lit.upper())
+
+    return sorted(vals)
+
 
 # [NUEVO] Detecta PERFORM VARYING (forma típica)
 def extract_perform_varying(cobol: str) -> List[Dict[str, Any]]:
@@ -780,6 +945,29 @@ def extract_perform_calls(cobol: str) -> List[Dict[str, Any]]:
         calls.append({"type": "perform_call", "target": name})
     return calls
 
+def detect_program_type(cobol: str) -> Dict[str, Any]:
+    """
+    Heurística simple:
+      - CICS si encuentra EXEC CICS o señales típicas (DFHCOMMAREA/EIB)
+      - Caso contrario: BATCH
+    """
+    cobol_nc = remove_cobol_comments(cobol)
+
+    markers = []
+
+    if re.search(r"\bEXEC\s+CICS\b", cobol_nc, flags=re.IGNORECASE):
+        markers.append("EXEC CICS")
+
+    # Señales típicas (a veces aparecen aunque no veas EXEC CICS por cómo está armado el fuente)
+    if re.search(r"\bDFHCOMMAREA\b", cobol_nc, flags=re.IGNORECASE):
+        markers.append("DFHCOMMAREA")
+    if re.search(r"\bEIB[A-Z0-9-]*\b", cobol_nc, flags=re.IGNORECASE):
+        markers.append("EIB*")
+
+    program_type = "CICS" if markers else "BATCH"
+
+    return {"type": program_type, "evidence": markers}
+
 
 def extract_perform_until(cobol: str) -> List[Dict[str, Any]]:
     loops: List[Dict[str, Any]] = []
@@ -830,44 +1018,80 @@ def build_functionality_summary(files_info: Dict[str, Any], metrics: Dict[str, i
     if outputs:
         parts.append(f"Genera/escribe {len(outputs)} archivo(s) de salida ({', '.join(outputs[:4])}{'…' if len(outputs) > 4 else ''}).")
 
-    # DB
+    # DB (con detalle de tablas y operaciones reales)
     if tables:
-        reads = []
-        writes = []
+        write_ops = {"INSERT", "UPDATE", "DELETE"}
+        read_ops = {"SELECT"}
+
+        reads_detail = []
+        writes_detail = []
+
         for t, ops in tables.items():
-            for op in ops:
-                if op in ("INSERT", "UPDATE", "DELETE"):
-                    writes.append(t)
-                elif op == "SELECT":
-                    reads.append(t)
-        reads = sorted(set(reads))
-        writes = sorted(set(writes))
+            ops_set = {op.upper() for op in (ops or [])}
 
-        if reads and not writes:
-            parts.append(f"Consulta {len(reads)} tabla(s) (SELECT).")
-        elif writes and not reads:
-            parts.append(f"Actualiza {len(writes)} tabla(s) (INSERT/UPDATE/DELETE).")
+            r = sorted(ops_set & read_ops)
+            w = sorted(ops_set & write_ops)
+
+            if r:
+                reads_detail.append((t, r))
+            if w:
+                writes_detail.append((t, w))
+
+        # orden estable
+        reads_detail.sort(key=lambda x: x[0])
+        writes_detail.sort(key=lambda x: x[0])
+
+        def fmt(detail):
+            # limita a 4 para que no sea eterno
+            shown = detail[:4]
+            txt = ", ".join([f"{t} ({'/'.join(ops)})" for t, ops in shown])
+            if len(detail) > 4:
+                txt += "…"
+            return txt
+
+        if reads_detail and not writes_detail:
+            parts.append(f"Consulta {len(reads_detail)} tabla(s): {fmt(reads_detail)}.")
+        elif writes_detail and not reads_detail:
+            parts.append(f"Actualiza {len(writes_detail)} tabla(s): {fmt(writes_detail)}.")
         else:
-            if reads:
-                parts.append(f"Consulta {len(reads)} tabla(s).")
-            if writes:
-                parts.append(f"Actualiza {len(writes)} tabla(s).")
-
-    # Tx
-    #if tx.get("has_commit") or tx.get("has_rollback"):
-    #    parts.append("Se detecta control transaccional (COMMIT/ROLLBACK).")
-    #else:
-    #    parts.append("No se detecta control transaccional (COMMIT/ROLLBACK).")
-
-    # Complejidad (muy conservador)
-    #if loops + ifs > 0:
-    #    parts.append(f"Contiene lógica de proceso (bucles: {loops}, condicionales: {ifs}, asignaciones: {moves}).")
-    #else:
-    #    parts.append(f"Lógica detectada baja (asignaciones: {moves}).")
-
+            if reads_detail:
+                parts.append(f"Consulta {len(reads_detail)} tabla(s): {fmt(reads_detail)}.")
+            if writes_detail:
+                parts.append(f"Actualiza {len(writes_detail)} tabla(s): {fmt(writes_detail)}.")
     # Fallback
     if not parts:
+        loops = metrics.get("loops_count", 0)
+        ifs = metrics.get("ifs_count", 0)
+        moves = metrics.get("moves_count", 0)
+        displays = metrics.get("displays_count", 0)
+
+        # Si hay CALLs, ya lo tratamos en otra regla (orquestador),
+        # pero por las dudas no lo pisamos acá.
+        calls_static = files_info.get("calls_static", [])
+        calls_dynamic = files_info.get("calls_dynamic", [])
+        if calls_static or calls_dynamic:
+            if calls_dynamic:
+                return "Programa orquestador que coordina la ejecución de subprogramas mediante llamadas dinámicas."
+            return "Programa coordinador que invoca subprogramas para ejecutar procesos específicos."
+
+        # Nuevo fallback "lógico"
+        hints = []
+        if loops:
+            hints.append("procesamiento iterativo")
+        if ifs:
+            hints.append("validaciones/decisiones")
+        if moves:
+            hints.append("cálculo/asignación de valores")
+        if displays:
+            hints.append("emisión de mensajes (DISPLAY)")
+
+        if hints:
+            # armar frase simple y no “marketing”
+            return "Procesamiento interno con " + ", ".join(hints) + "."
+
         return "No se pudo inferir una funcionalidad general con las reglas actuales."
+
+
 
     return " ".join(parts)
 
@@ -890,6 +1114,10 @@ def explain_cobol_file(path: str) -> CobolExplanation:
     sql_usages = extract_sql_table_usage(cobol)
     tables = summarize_table_usage(sql_usages)
     copies = extract_copybooks(cobol) 
+    calls_info = extract_calls(cobol)
+    program_type = detect_program_type(cobol)
+
+
 
     # Clasificación por modo OPEN
     inputs = [f for f, m in open_modes.items() if m == "INPUT"]
@@ -905,12 +1133,17 @@ def explain_cobol_file(path: str) -> CobolExplanation:
         "tx": tx,                 
         "fd_sizes": fd_sizes,
         "copybooks": copies,   # 👈 NUEVO
+        "calls": calls_info.get("all", []),                 # compat
+        "calls_static": calls_info.get("static", []),       # nuevo
+        "calls_dynamic": calls_info.get("dynamic", []),     # nuevo
+        "program_type": program_type,
     }
 
     metrics = {
         "loops_count": len(loops),
         "ifs_count": len(extract_if_conditions(cobol)),
         "moves_count": len(extract_moves(cobol)),
+        "displays_count": detect_display_count(cobol),
     }
 
     files_info["functional_summary"] = build_functionality_summary(files_info, metrics)

@@ -46,10 +46,6 @@ function heroCard(title, bodyHtml) {
           </div>
 
           <div class="fs-6">${bodyHtml}</div>
-
-          <div class="mt-3 small text-muted">
-            *Generado automáticamente a partir de archivos, SQL y control transaccional detectado.
-          </div>
         </div>
       </div>
     </div>
@@ -94,9 +90,17 @@ form.addEventListener("submit", async (e) => {
     </div>
     `;
 
+    // Functional summary
+    resultsDiv.innerHTML += heroCard("Funcionalidad (estimada)", `
+      ${s.functional_summary ? `<div>${s.functional_summary}</div>` : `<div class="text-muted">—</div>`}
+    `);
+
 
     // Cards
+    const progType = s.program_type?.type ?? "—";
+
     resultsDiv.innerHTML += card(`Programa: ${s.program_id ?? "N/D"}`, `
+    <div class="mt-1"><span class="text-muted">Tipo:</span> <b>${progType}</b></div>
     <div class="mt-1"><span class="text-muted">Bucles:</span> <b>${s.loops_count}</b></div>
     <div><span class="text-muted">Condicionales:</span> <b>${s.ifs_count}</b></div>
     <div><span class="text-muted">Asignaciones:</span> <b>${s.moves_count}</b></div>
@@ -134,8 +138,6 @@ form.addEventListener("submit", async (e) => {
     `;
     }
 
-
-
     // Tablas SQL
     const tables = s.sql_tables || {};
     const tableLines = Object.entries(tables).map(
@@ -161,10 +163,14 @@ form.addEventListener("submit", async (e) => {
       { icon: "📚", accentClass: "bg-primary" }
     );
 
-    // Functional summary
-    resultsDiv.innerHTML += heroCard("Funcionalidad (estimada)", `
-      ${s.functional_summary ? `<div>${s.functional_summary}</div>` : `<div class="text-muted">—</div>`}
-    `);
+    // CALLs (subprogramas)
+resultsDiv.innerHTML += card("CALLs", list(s.calls_static ?? []),
+  { icon: "📞", accentClass: "bg-primary" , subtitle: "Llamadas estáticas"}
+);
+
+resultsDiv.innerHTML += card("CALLs", list(s.calls_dynamic ?? []),
+  { icon: "🧩", accentClass: "bg-primary" , subtitle: "Llamadas dinámicas"}
+);
 
     // Downloads
     dlTech.href = s.downloads.tech;
