@@ -9,7 +9,9 @@ venv/
 # Archivos generados por tu app
 uploads/
 outputs/
-*.txt
+# TXT generados por la app
+Analisis_*.txt
+
 
 # Configuración local de VS Code
 .vscode/
