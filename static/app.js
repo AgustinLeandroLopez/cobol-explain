@@ -172,6 +172,34 @@ resultsDiv.innerHTML += card("CALLs", list(s.calls_dynamic ?? []),
   { icon: "🧩", accentClass: "bg-primary" , subtitle: "Llamadas dinámicas"}
 );
 
+// CICS Commands
+const cics = s.cics_commands ?? { LINK: [], XCTL: [], START: [], RETURN: [] };
+
+function renderCicsCommands(c) {
+  const sections = [
+    ["LINK", c.LINK ?? []],
+    ["XCTL", c.XCTL ?? []],
+    ["START", c.START ?? []],
+    ["RETURN", c.RETURN ?? []],
+  ];
+
+  const hasAny = sections.some(([, arr]) => arr.length > 0);
+  if (!hasAny) return `<div class="text-muted">—</div>`;
+
+  return sections.map(([name, arr]) => `
+    <div class="mb-2">
+      <div><b>${name}</b> <span class="text-muted">(${arr.length})</span></div>
+      ${arr.length ? `<ul class="mb-0">${arr.map(x => `<li>${x}</li>`).join("")}</ul>` : `<div class="text-muted small">—</div>`}
+    </div>
+  `).join("");
+}
+
+resultsDiv.innerHTML += card("CICS Commands", renderCicsCommands(cics),
+  { icon: "🔗", accentClass: "bg-dark", subtitle: "Detección de EXEC CICS (LINK/XCTL/START/RETURN)" }
+);
+
+
+
     // Downloads
     dlTech.href = s.downloads.tech;
     dlFunc.href = s.downloads.func;

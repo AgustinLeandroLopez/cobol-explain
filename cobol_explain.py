@@ -27,16 +27,23 @@ class CobolExplanation:
         else:
             lines.append("⚠️ No se encontró PROGRAM-ID.")
 
-        """if self.displays:
-            lines.append(f"✅ DISPLAY detectados: {len(self.displays)}")
-        else:
-            lines.append("ℹ️ DISPLAY detectados: 0")"""
-
         inputs = self.files.get("inputs", [])
         outputs = self.files.get("outputs", [])
         assigns = self.files.get("assign", {})
         tables = self.files.get("sql_tables", {})
         tx = self.files.get("tx", {})
+        copybooks = self.files.get("copybooks", []) or []
+        calls_static = self.files.get("calls_static", []) or []
+        calls_dynamic = self.files.get("calls_dynamic", []) or []
+        cics_cmds = self.files.get("cics_commands", {}) or {}
+
+
+        def _strip_html(s: str) -> str:
+       # Convierte strings pensados para la web a texto plano para el TXT
+            if not s:
+                return s
+            s = re.sub(r"<[^>]+>", "", s)  # borra tags tipo <b>...</b>
+            return s.replace("&nbsp;", " ").strip()
 
         if inputs:
             lines.append(f"✅ LEE {len(inputs)} archivo(s) de entrada:")
@@ -77,27 +84,62 @@ class CobolExplanation:
         else:
             lines.append("ℹ️ No se detecta ROLLBACK")
 
-
-        """if self.has_stop or self.has_goback:
-            end_type = []
-            if self.has_stop:
-                end_type.append("STOP RUN")
-            if self.has_goback:
-                end_type.append("GOBACK")
-            lines.append(f"✅ Finaliza ejecución con: {', '.join(end_type)}")
+        # Copybooks
+        lines.append("")
+        if copybooks:
+            lines.append(f"✅ COPYBOOKS detectados: {len(copybooks)}")
+            for c in copybooks:
+                lines.append(f"   - {c}")
         else:
-            lines.append("⚠️ No se detectó STOP RUN ni GOBACK (fin del programa).")"""
+            lines.append("ℹ️ COPYBOOKS detectados: 0")
+
+        # CALLs
+        lines.append("")
+        if calls_static or calls_dynamic:
+            total_calls = len(calls_static) + len(calls_dynamic)
+            lines.append(f"✅ CALLs detectadas: {total_calls}")
+
+            if calls_static:
+                lines.append(f"   • Estáticas: {len(calls_static)}")
+                for c in calls_static:
+                    lines.append(f"     - {_strip_html(c)}")
+            else:
+                lines.append("   • Estáticas: 0")
+
+            if calls_dynamic:
+                lines.append(f"   • Dinámicas: {len(calls_dynamic)}")
+                for c in calls_dynamic:
+                    lines.append(f"     - {_strip_html(c)}")
+            else:
+                lines.append("   • Dinámicas: 0")
+        else:
+            lines.append("ℹ️ CALLs detectadas: 0")
+
+        # CICS Commands
+        lines.append("")
+        if cics_cmds:
+            total_cics = sum(len(v) for v in cics_cmds.values())
+            if total_cics > 0:
+                lines.append(f"✅ CICS Commands detectados: {total_cics}")
+
+                for cmd in ("LINK", "XCTL", "START", "RETURN"):
+                    items = cics_cmds.get(cmd, [])
+                    if items:
+                        lines.append(f"   • {cmd}: {len(items)}")
+                        for it in items:
+                            lines.append(f"     - {_strip_html(it)}")
+                    else:
+                        lines.append(f"   • {cmd}: 0")
+            else:
+                lines.append("ℹ️ CICS Commands detectados: 0")
+        else:
+            lines.append("ℹ️ CICS Commands detectados: 0")
+
 
         lines.append("")
         lines.append("⚠️ Reportes de bucles, condicionales en Analisis_Cobol_Funcional.txt")
 
         prog = self.program_id or "DESCONOCIDO"
-
-        """display_count = len(self.displays)
-        lines.append(
-            f"Este programa COBOL se identifica como '{prog}'. "
-            f"Se detectaron {display_count} sentencias DISPLAY (no se listan los mensajes)."
-        )"""
 
         return "\n".join(lines)
     ############ SALIDA DETALLADAS DE CONDICIONALES, BUCLES, MOVES, ETC   ############
@@ -322,6 +364,7 @@ def extract_copybooks(cobol: str) -> List[str]:
 
     return sorted(copies)
 
+
 def extract_calls(cobol: str) -> Dict[str, List[str]]:
     """
     Separa CALLs:
@@ -426,7 +469,7 @@ def extract_calls(cobol: str) -> Dict[str, List[str]]:
             targets = sorted(targets)
 
             if targets:
-                display += f" → <b>Targets:</b> {', '.join(targets)}"
+                display += f" → <b>Programas:</b> {', '.join(targets)}"
 
 
             if display not in seen_dynamic:
@@ -436,6 +479,127 @@ def extract_calls(cobol: str) -> Dict[str, List[str]]:
     all_calls = static_calls + dynamic_calls
     return {"static": static_calls, "dynamic": dynamic_calls, "all": all_calls}
 
+
+def _clean_cics_arg(value: str) -> str:
+    """Limpia argumentos tipo 'PGM' o (WS-VAR) que vienen con espacios/saltos."""
+    if not value:
+        return value
+    v = re.sub(r"\s+", " ", value).strip()
+    # quita comillas simples o dobles
+    if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
+        v = v[1:-1].strip()
+    return v
+
+
+def extract_cics_commands(cobol: str) -> Dict[str, List[str]]:
+    """
+    Devuelve:
+      {
+        "LINK":   ["PGM — COMMAREA: X — LENGTH: Y", ...],
+        "XCTL":   ["PGM — COMMAREA: X — LENGTH: Y", ...],
+        "START":  ["TRANSID: T — FROM: X — LENGTH: Y", ...],
+        "RETURN": ["TRANSID: T — COMMAREA: X — LENGTH: Y", ...]
+      }
+    """
+    cobol_nc = remove_cobol_comments(cobol)
+
+    def clean(v: str) -> str:
+        if not v:
+            return v
+        v = re.sub(r"\s+", " ", v).strip()
+        if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
+            v = v[1:-1].strip()
+        return v
+
+    out: Dict[str, List[str]] = {"LINK": [], "XCTL": [], "START": [], "RETURN": []}
+
+    blocks = re.findall(
+        r"\bEXEC\s+CICS\b(.*?)\bEND-EXEC\b",
+        cobol_nc,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+
+    for b in blocks:
+        bb = b
+
+        # LINK / XCTL
+        for cmd in ("LINK", "XCTL"):
+            if re.search(rf"\b{cmd}\b", bb, flags=re.IGNORECASE):
+                pm = re.search(rf"\b{cmd}\b.*?\bPROGRAM\s*\(\s*([^)]+?)\s*\)", bb, flags=re.I | re.S)
+                if not pm:
+                    continue
+                program = clean(pm.group(1))
+
+                cm = re.search(r"\bCOMMAREA\s*\(\s*([^)]+?)\s*\)", bb, flags=re.I | re.S)
+                commarea = clean(cm.group(1)) if cm else None
+
+                lm = re.search(r"\bLENGTH\s*\(\s*([^)]+?)\s*\)", bb, flags=re.I | re.S)
+                length = clean(lm.group(1)) if lm else None
+
+                item = program
+                if commarea:
+                    item += f" → <b> COMMAREA:</b> {commarea}"
+                if length:
+                    item += f" → <b> LENGTH:</b> {length}"
+
+                out[cmd].append(item)
+
+        # START (suele usar TRANSID/REQID/COMMAREA o FROM/LENGTH)
+        if re.search(r"\bSTART\b", bb, flags=re.IGNORECASE):
+            tm = re.search(r"\bTRANSID\s*\(\s*([^)]+?)\s*\)", bb, flags=re.I | re.S)
+            transid = clean(tm.group(1)) if tm else None
+
+            fm = re.search(r"\bFROM\s*\(\s*([^)]+?)\s*\)", bb, flags=re.I | re.S)
+            fromv = clean(fm.group(1)) if fm else None
+
+            lm = re.search(r"\bLENGTH\s*\(\s*([^)]+?)\s*\)", bb, flags=re.I | re.S)
+            length = clean(lm.group(1)) if lm else None
+
+            item_parts = []
+            if transid:
+                item_parts.append(f"TRANSID: {transid}")
+            if fromv:
+                item_parts.append(f"FROM: {fromv}")
+            if length:
+                item_parts.append(f"LENGTH: {length}")
+
+            if item_parts:
+                out["START"].append(" — ".join(item_parts))
+
+        # RETURN
+        if re.search(r"\bRETURN\b", bb, flags=re.IGNORECASE):
+            tm = re.search(r"\bTRANSID\s*\(\s*([^)]+?)\s*\)", bb, flags=re.I | re.S)
+            transid = clean(tm.group(1)) if tm else None
+
+            cm = re.search(r"\bCOMMAREA\s*\(\s*([^)]+?)\s*\)", bb, flags=re.I | re.S)
+            commarea = clean(cm.group(1)) if cm else None
+
+            lm = re.search(r"\bLENGTH\s*\(\s*([^)]+?)\s*\)", bb, flags=re.I | re.S)
+            length = clean(lm.group(1)) if lm else None
+
+            item_parts = []
+            if transid:
+                item_parts.append(f"TRANSID: {transid}")
+            if commarea:
+                item_parts.append(f"COMMAREA: {commarea}")
+            if length:
+                item_parts.append(f"LENGTH: {length}")
+
+            if item_parts:
+                out["RETURN"].append(" — ".join(item_parts))
+
+    # dedup manteniendo orden
+    for k in list(out.keys()):
+        seen = set()
+        ded = []
+        for x in out[k]:
+            if x not in seen:
+                seen.add(x)
+                ded.append(x)
+        out[k] = ded
+
+    # si todo vacío, devolvemos igual (para el front)
+    return out
 
 
 
@@ -466,13 +630,20 @@ def remove_cobol_comments(cobol: str) -> str:
         cleaned_lines.append(line)
     return "\n".join(cleaned_lines)
 
-def detect_display_count(cobol: str) -> int:
+def detect_if_count(cobol: str) -> int:
+    """
+    Cuenta IF reales (incluye ELSE IF) en PROCEDURE DIVISION, ignorando comentarios.
+    """
     cobol_nc = remove_cobol_comments(cobol)
-    # Solo PROCEDURE DIVISION para evitar data division
+
+    # Solo PROCEDURE DIVISION para evitar falsos positivos en DATA DIVISION
     m = re.search(r"\bPROCEDURE\s+DIVISION\b", cobol_nc, flags=re.IGNORECASE)
     if m:
         cobol_nc = cobol_nc[m.end():]
-    return len(re.findall(r"(?i)\bDISPLAY\b", cobol_nc))
+
+    # Cuenta líneas que arrancan con IF o ELSE IF (con indentación)
+    return len(re.findall(r"(?mi)^\s*(?:ELSE\s+)?IF\b", cobol_nc))
+
 
 
 def extract_data_record_name(fd_block: str) -> Optional[str]:
@@ -968,6 +1139,13 @@ def detect_program_type(cobol: str) -> Dict[str, Any]:
 
     return {"type": program_type, "evidence": markers}
 
+def detect_display_count(cobol: str) -> int:
+    cobol_nc = remove_cobol_comments(cobol)
+    # Solo PROCEDURE DIVISION para evitar data division
+    m = re.search(r"\bPROCEDURE\s+DIVISION\b", cobol_nc, flags=re.IGNORECASE)
+    if m:
+        cobol_nc = cobol_nc[m.end():]
+    return len(re.findall(r"(?i)\bDISPLAY\b", cobol_nc))
 
 def extract_perform_until(cobol: str) -> List[Dict[str, Any]]:
     loops: List[Dict[str, Any]] = []
@@ -1116,7 +1294,7 @@ def explain_cobol_file(path: str) -> CobolExplanation:
     copies = extract_copybooks(cobol) 
     calls_info = extract_calls(cobol)
     program_type = detect_program_type(cobol)
-
+    cics_cmds = extract_cics_commands(cobol)
 
 
     # Clasificación por modo OPEN
@@ -1137,14 +1315,20 @@ def explain_cobol_file(path: str) -> CobolExplanation:
         "calls_static": calls_info.get("static", []),       # nuevo
         "calls_dynamic": calls_info.get("dynamic", []),     # nuevo
         "program_type": program_type,
+        "cics_commands": cics_cmds,
     }
 
     metrics = {
         "loops_count": len(loops),
-        "ifs_count": len(extract_if_conditions(cobol)),
+        "ifs_count": detect_if_count(cobol),
         "moves_count": len(extract_moves(cobol)),
         "displays_count": detect_display_count(cobol),
     }
+
+    files_info["loops_count"] = metrics["loops_count"]
+    files_info["ifs_count"] = metrics["ifs_count"]
+    files_info["moves_count"] = metrics["moves_count"]
+    files_info["displays_count"] = metrics["displays_count"]
 
     files_info["functional_summary"] = build_functionality_summary(files_info, metrics)
 

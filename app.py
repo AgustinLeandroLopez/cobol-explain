@@ -80,10 +80,11 @@ def analyze():
         "calls": files.get("calls", []),   # 👈 NUEVO
         "calls_static": files.get("calls_static", []),
         "calls_dynamic": files.get("calls_dynamic", []),
+        "cics_commands": files.get("cics_commands", {"LINK": [], "XCTL": [], "START": [], "RETURN": []}),
         "functional_summary": files.get("functional_summary"),
         "program_type": files.get("program_type", {"type": "BATCH", "evidence": []}),
         "loops_count": len(explanation.loops or []),
-        "ifs_count": len(explanation.conditions or []),
+        "ifs_count": files.get("ifs_count", len(explanation.conditions or [])),
         "moves_count": len(explanation.moves or []),
         "downloads": {
             "tech": f"/download/{tech_name}",
